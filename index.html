@@ -558,13 +558,15 @@ label.rc-ck small{display:block;color:var(--muted);font-size:11px}
     <div class="actions"><input id="eqQ" placeholder="Find a unit, trailer, VIN or plate" style="width:260px"><select id="eqSt" style="width:auto" aria-label="Truck status"><option value="all">All trucks</option><option>Active</option><option>Shop</option><option>Out of service</option><option>Sold</option></select></div>
     <div class="split"><h2 id="eqdbH">Trucks <span class="small muted" id="trkCnt"></span></h2><button class="sm" id="trkAdd">Add truck</button></div>
     <div class="small muted">Trucks in Shop, Out of service or Sold stay off the planner. Unit number, trailer type and driver are set on Plan rounds.</div>
-    <div class="tablewrap" style="max-height:none"><table style="min-width:1200px"><thead><tr><th>Unit</th><th>Status</th><th>Year</th><th>Make / model</th><th>VIN</th><th>Plate</th><th>Owner</th><th>ELD device</th><th>Runs</th><th>Trailer</th><th>Driver</th><th>Notes</th><th></th></tr></thead><tbody id="trkTable"></tbody></table></div>
+    <div class="tablewrap" style="max-height:none"><table style="min-width:1200px"><thead><tr><th>Unit</th><th>Status</th><th>Year</th><th>Make / model</th><th>VIN</th><th>Plate</th><th>Owner</th><th>ELD device</th><th>Runs</th><th>Trailer</th><th>Driver</th><th>Live (ISAAC)</th><th>Notes</th><th></th></tr></thead><tbody id="trkTable"></tbody></table></div>
     <div class="split"><h2>Trailers <span class="small muted" id="trlCnt"></span></h2><button class="sm" id="trlAdd">Add trailer</button></div>
     <div class="tablewrap" style="max-height:none"><table style="min-width:1100px"><thead><tr><th>Trailer #</th><th>Type</th><th>Year</th><th>Reefer unit</th><th>Reefer serial</th><th>ORBCOMM asset ID</th><th>Status</th><th>Location</th><th>On truck</th><th>Notes</th><th></th></tr></thead><tbody id="trlTable"></tbody></table></div>
     <div id="fxDetail"></div>
   </section>
   <section id="pg_maint" class="col" hidden aria-labelledby="mH">
     <div class="split"><h2 id="mH">Maintenance</h2><div class="seg" role="group" aria-label="Show"><button data-mv="trucks">Trucks</button><button data-mv="trailers">Trailers</button></div></div>
+    <section class="panel" id="faultsPanel"><div class="hd"><h2>Truck faults from ISAAC <span class="small muted" id="faultsCnt"></span></h2><span class="small muted">Flag it and a work order opens on the truck. Dismiss it and it stays quiet unless it comes back.</span></div><div id="faultsBody" class="col" style="gap:8px"></div></section>
+    <section class="panel" id="shopPanel"><div class="hd"><h2>Shop queue <span class="small muted" id="shopCnt"></span></h2><span class="small muted">Open work orders on the real shop table.</span></div><div id="shopBody" class="col" style="gap:8px"></div></section>
     <div id="mMain" class="col" style="gap:12px"></div>
     <div id="mDetail" class="col" style="gap:12px" hidden></div>
     <section class="panel"><details><summary>PM schedule settings</summary><div id="pmPlans" class="col" style="gap:12px;margin-top:10px"></div></details></section>
@@ -765,6 +767,68 @@ async function renderUsers() {
 }
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", () => { const b = document.getElementById("usersRefresh"); if (b) b.addEventListener("click", renderUsers); });
 else { const b = document.getElementById("usersRefresh"); if (b) b.addEventListener("click", renderUsers); }
+
+/* --- live telematics, faults and shop queue from the real tables --- */
+const TELE = { trucks: {}, faults: [], wos: [], loaded: false };
+const lhAgo = at => { if (!at) return ""; const m = Math.round((Date.now() - new Date(at).getTime()) / 60000); return m < 1 ? "just now" : m < 60 ? m + " min ago" : m < 1440 ? Math.round(m / 60) + " hr ago" : Math.round(m / 1440) + " d ago"; };
+function lhLiveCell(unit) {
+  const t = TELE.trucks[String(unit)]; if (!t) return '<span class="muted">-</span>';
+  const open = TELE.faults.filter(f => f.unit === String(unit) && (f.status === "new" || f.status === "flagged")).length;
+  const bits = [];
+  if (t.last_position_at) bits.push((t.last_address ? lhEsc(t.last_address) : (t.last_lat != null ? t.last_lat.toFixed(2) + ", " + t.last_lng.toFixed(2) : "")) + ' <span class="muted">' + lhAgo(t.last_position_at) + (t.last_speed ? ", " + Math.round(t.last_speed) + " mph" : "") + "</span>");
+  if (t.odometer != null) bits.push(Math.round(t.odometer).toLocaleString() + " mi" + (t.engine_hours != null ? " · " + Math.round(t.engine_hours).toLocaleString() + " hrs" : ""));
+  if (open) bits.push('<a href="#maint" class="pill bad" style="text-decoration:none">' + open + " fault" + (open > 1 ? "s" : "") + "</a>");
+  return bits.join("<br>") || '<span class="muted">no data yet</span>';
+}
+async function lhTeleLoad() {
+  if (!lhSession) return;
+  const [t, f, w] = await Promise.all([
+    sb.from("trucks").select("id,unit,status,last_lat,last_lng,last_speed,last_position_at,last_address,odometer,odometer_at,engine_hours"),
+    sb.from("truck_faults").select("*").in("status", ["new", "flagged"]).order("last_seen_at", { ascending: false }),
+    sb.from("work_orders").select("id,wo_no,truck_id,trailer_id,wo_type,status,priority,truck_down,complaint,opened_at,eta_back,notes").not("status", "in", "(closed,cancelled)").order("opened_at", { ascending: false }),
+  ]);
+  TELE.trucks = {}; (t.data || []).forEach(x => TELE.trucks[String(x.unit)] = x);
+  TELE.faults = f.data || []; TELE.wos = w.data || []; TELE.loaded = true;
+  if (typeof PAGE !== "undefined") { if (PAGE === "equip" && typeof renderEquipDb === "function") renderEquipDb(); if (PAGE === "maint") renderFaults(); }
+}
+let teleT = null; const teleSoon = () => { clearTimeout(teleT); teleT = setTimeout(lhTeleLoad, 400); };
+lhReady.then(() => {
+  lhTeleLoad();
+  ["trucks", "truck_faults", "work_orders"].forEach(tb => sb.channel("tele-" + tb).on("postgres_changes", { event: "*", schema: "public", table: tb }, teleSoon).subscribe());
+  setInterval(lhTeleLoad, 120000);
+});
+const unitOfWo = w => { const u = Object.values(TELE.trucks).find(t => t.id === w.truck_id); return u ? u.unit : ""; };
+function renderFaults() {
+  const fb = document.getElementById("faultsBody"), sbx = document.getElementById("shopBody"); if (!fb) return;
+  const canAct = lhProfile && (lhProfile.is_admin || (lhProfile.roles || []).some(r => ["dispatch", "shop_lead", "safety", "owner"].includes(r)));
+  const fc = document.getElementById("faultsCnt"); if (fc) fc.textContent = TELE.faults.length ? TELE.faults.length + " open" : "";
+  fb.innerHTML = !TELE.loaded ? '<div class="muted small">Loading...</div>' : !TELE.faults.length ? '<div class="empty">No open fault codes. ISAAC checks every 5 minutes.</div>' :
+    '<div class="tablewrap" style="max-height:none"><table><thead><tr><th>Unit</th><th>Code</th><th>What</th><th>Lamp</th><th>Seen</th><th>Status</th><th></th></tr></thead><tbody>' +
+    TELE.faults.map(f => '<tr><td class="num"><b>' + lhEsc(f.unit) + '</b></td><td class="num">' + lhEsc(f.code) + '</td><td class="small">' + lhEsc([f.description, f.fmi_description].filter(Boolean).join(" · ")) + (f.source_desc ? ' <span class="muted">(' + lhEsc(f.source_desc) + ')</span>' : '') + '</td><td>' + (f.lamp ? '<span class="pill ' + (/red|stop/i.test(f.lamp) ? 'bad' : 'warn') + '">' + lhEsc(f.lamp) + '</span>' : '') + '</td><td class="small">' + lhAgo(f.last_seen_at) + (f.occurrences > 1 ? ' <span class="muted">' + f.occurrences + 'x</span>' : '') + '</td><td>' +
+      (f.status === "flagged" ? '<span class="pill info">In shop queue</span>' : '<span class="pill warn">New</span>') + '</td><td><span class="actions" style="flex-wrap:nowrap">' +
+      (canAct && f.status === "new" ? '<button class="sm pri" data-flag="' + f.id + '">Flag to shop</button><button class="sm" data-dismiss="' + f.id + '">Dismiss</button>' : '') + '</span></td></tr>').join("") + '</tbody></table></div>';
+  fb.querySelectorAll("[data-flag]").forEach(b => b.addEventListener("click", async () => {
+    b.disabled = true; const { error } = await sb.rpc("flag_fault", { p_fault: b.dataset.flag, p_priority: "high" });
+    if (error) { alert("Couldn't flag it: " + error.message); b.disabled = false; return; } lhTeleLoad();
+  }));
+  fb.querySelectorAll("[data-dismiss]").forEach(b => b.addEventListener("click", async () => {
+    const why = prompt("Dismiss this code. Reason (optional):"); if (why === null) return;
+    const { error } = await sb.rpc("dismiss_fault", { p_fault: b.dataset.dismiss, p_reason: why || null });
+    if (error) { alert("Couldn't dismiss it: " + error.message); return; } lhTeleLoad();
+  }));
+  if (!sbx) return;
+  const sc = document.getElementById("shopCnt"); if (sc) sc.textContent = TELE.wos.length ? TELE.wos.length + " open" : "";
+  const ST = [["open", "Open"], ["in_progress", "In progress"], ["waiting_parts", "Waiting on parts"], ["waiting_vendor", "Waiting on vendor"], ["done", "Done"], ["closed", "Closed"], ["cancelled", "Cancelled"]];
+  sbx.innerHTML = !TELE.wos.length ? '<div class="empty">Nothing in the shop queue.</div>' :
+    '<div class="tablewrap" style="max-height:none"><table><thead><tr><th>WO</th><th>Unit</th><th>Priority</th><th>Complaint</th><th>Opened</th><th>Status</th></tr></thead><tbody>' +
+    TELE.wos.map(w => '<tr><td class="num">' + lhEsc(w.wo_no) + '</td><td class="num"><b>' + lhEsc(unitOfWo(w)) + '</b></td><td>' + (w.truck_down || w.priority === "truck_down" ? '<span class="pill bad">Truck down</span>' : w.priority === "high" ? '<span class="pill warn">High</span>' : lhEsc(w.priority)) + '</td><td class="small">' + lhEsc(w.complaint) + '</td><td class="small">' + lhAgo(w.opened_at) + '</td><td>' +
+      (canAct ? '<select data-wo="' + w.id + '">' + ST.map(x => '<option value="' + x[0] + '"' + (x[0] === w.status ? ' selected' : '') + '>' + x[1] + '</option>').join("") + '</select>' : lhEsc(w.status)) + '</td></tr>').join("") + '</tbody></table></div>';
+  sbx.querySelectorAll("[data-wo]").forEach(sel => sel.addEventListener("change", async () => {
+    const patch = { status: sel.value }; if (sel.value === "done") patch.done_at = new Date().toISOString();
+    const { error } = await sb.from("work_orders").update(patch).eq("id", sel.dataset.wo);
+    if (error) { alert("Couldn't update: " + error.message); } lhTeleLoad();
+  }));
+}
 
 /* --- the shim the app calls --- */
 const claude = {
@@ -1621,7 +1685,7 @@ const mPill=d=>'<span class="pill '+(d.state==="over"?"bad":"warn")+'">'+esc(d.n
 const mOdo=key=>{const c=curReading(key);return c&&c.odo!==""&&c.odo!=null?Math.round(numOr(c.odo)).toLocaleString()+" mi":""};
 function mTop(){const p=$("#pg_maint");if(p&&p.scrollIntoView)p.scrollIntoView({block:"start"})}
 function renderMaint(){
-  const box=$("#mMain");if(!box)return;ensureComp();
+  const box=$("#mMain");if(!box)return;ensureComp();try{renderFaults()}catch(e){}
   document.querySelectorAll("[data-mv]").forEach(b=>{b.setAttribute("aria-pressed",b.dataset.mv===MVIEW);b.onclick=()=>{MVIEW=b.dataset.mv;MOPEN="";renderMaint()}});
   const pb=$("#pmPlans");
   if(pb){pb.innerHTML=["truck","trailer"].map(kind=>'<div class="col" style="gap:6px"><div class="lbl">'+(kind==="truck"?"Trucks":"Trailers and reefer units")+'</div><div class="tablewrap" style="max-height:none"><table class="mk" style="min-width:720px"><thead><tr><th>PM</th><th class="r">Every (mi)</th><th class="r">Every (days)</th><th class="r">Every (reefer hrs)</th><th>Covers</th></tr></thead><tbody>'+
@@ -2397,7 +2461,7 @@ function renderEquipDb(){
   const trks=S.trucks.filter(t=>(EQF.st==="all"||(t.status||"Active")===EQF.st)&&(!q||[t.unit,t.vin,t.plate,t.make,fxT(t).lessor,fxT(t).device].join(" ").toLowerCase().includes(q)));
   const act=S.trucks.filter(t=>(t.status||"Active")==="Active").length;$("#trkCnt").textContent=S.trucks.length+" total, "+act+" active";$("#trlCnt").textContent=(S.trailers||[]).length+" total";
   tb.innerHTML=trks.length?trks.map(t=>{const ci=(k,w,ph)=>'<input data-tk="'+t.id+'" data-k="'+k+'" value="'+esc(t[k]||"")+'"'+(w?' style="width:'+w+'px"':"")+(ph?' placeholder="'+ph+'"':"")+'>';const x=fxT(t);
-    return'<tr class="'+(FXOPEN==="t:"+t.id?"used":"")+'"><td class="num"><b>'+esc(t.unit)+'</b></td><td><select data-tk="'+t.id+'" data-k="status" style="min-width:140px">'+TRK_STATUS.map(s=>'<option'+(s===(t.status||"Active")?" selected":"")+'>'+s+'</option>').join("")+'</select></td><td>'+ci("year",60)+'</td><td>'+ci("make",150,"Freightliner Cascadia")+'</td><td>'+ci("vin",170)+'</td><td>'+ci("plate",80)+'</td><td class="small">'+(x.lessor?'<span class="pill info">'+esc(x.lessor)+'</span>':"Company")+'</td><td class="small">'+esc(x.device||"")+'</td><td>'+esc(t.equip)+'</td><td><select data-tk="'+t.id+'" data-k="trailerId">'+trlOptions(t)+'</select></td><td>'+esc(crewName(t)||"-")+'</td><td>'+ci("notes",140)+'</td><td><button class="sm" data-fxo="t:'+t.id+'">Details</button></td></tr>'}).join(""):'<tr><td colspan="13" class="muted">No trucks match.</td></tr>';
+    return'<tr class="'+(FXOPEN==="t:"+t.id?"used":"")+'"><td class="num"><b>'+esc(t.unit)+'</b></td><td><select data-tk="'+t.id+'" data-k="status" style="min-width:140px">'+TRK_STATUS.map(s=>'<option'+(s===(t.status||"Active")?" selected":"")+'>'+s+'</option>').join("")+'</select></td><td>'+ci("year",60)+'</td><td>'+ci("make",150,"Freightliner Cascadia")+'</td><td>'+ci("vin",170)+'</td><td>'+ci("plate",80)+'</td><td class="small">'+(x.lessor?'<span class="pill info">'+esc(x.lessor)+'</span>':"Company")+'</td><td class="small">'+esc(x.device||"")+'</td><td>'+esc(t.equip)+'</td><td><select data-tk="'+t.id+'" data-k="trailerId">'+trlOptions(t)+'</select></td><td>'+esc(crewName(t)||"-")+'</td><td class="small">'+lhLiveCell(t.unit)+'</td><td>'+ci("notes",140)+'</td><td><button class="sm" data-fxo="t:'+t.id+'">Details</button></td></tr>'}).join(""):'<tr><td colspan="14" class="muted">No trucks match.</td></tr>';
   tb.querySelectorAll("[data-tk]").forEach(x=>x.addEventListener("change",()=>{const t=S.trucks.find(y=>y.id===x.dataset.tk);if(!t)return;t[x.dataset.k]=x.value.trim();save();renderEquipDb();renderTrucks();if(x.dataset.k==="status")buildPlan(true)}));
   const trls=(S.trailers||[]).filter(r=>!q||[r.no,r.reefer,r.location,fxR(r).vin,fxR(r).plate,fxR(r).reeferSerial,fxR(r).rfid].join(" ").toLowerCase().includes(q));
   rb.innerHTML=trls.length?trls.map(r=>{const on=S.trucks.find(t=>t.trailerId===r.id);const ci=(k,w,ph)=>'<input data-rl="'+r.id+'" data-k="'+k+'" value="'+esc(r[k]||"")+'"'+(w?' style="width:'+w+'px"':"")+(ph?' placeholder="'+ph+'"':"")+'>';
