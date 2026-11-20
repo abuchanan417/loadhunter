@@ -261,7 +261,7 @@ label.rc-ck small{display:block;color:var(--muted);font-size:11px}
     </div>
     <div class="actions" id="statusPills"></div>
   </header>
-  <nav class="tabs" aria-label="Pages"><a href="#plan" data-pg="plan" aria-current="page">Plan rounds</a><a href="#loads" data-pg="loads">Booked loads <span id="nBooked" class="cnt"></span></a><a href="#active" data-pg="active">Active board <span id="nActive" class="cnt"></span></a><a href="#crm" data-pg="crm">Customers <span id="nCrm" class="cnt"></span></a><a href="#map" data-pg="map">Map</a><a href="#drivers" data-pg="drivers">Drivers</a><a href="#recruit" data-pg="recruit">Recruiting <span id="nRecruit" class="cnt"></span></a><a href="#equip" data-pg="equip">Trucks and trailers</a><a href="#maint" data-pg="maint">Maintenance</a><a href="#claims" data-pg="claims">Accidents &amp; claims <span id="nClaims" class="cnt"></span></a><a href="#ifta" data-pg="ifta">IFTA</a><a href="#edi" data-pg="edi">EDI tenders <span id="nEdi" class="cnt"></span></a><a href="#driver" data-pg="driver">Driver app</a></nav>
+  <nav class="tabs" aria-label="Pages"><a href="#plan" data-pg="plan" aria-current="page">Plan rounds</a><a href="#loads" data-pg="loads">Booked loads <span id="nBooked" class="cnt"></span></a><a href="#active" data-pg="active">Active board <span id="nActive" class="cnt"></span></a><a href="#crm" data-pg="crm">Customers <span id="nCrm" class="cnt"></span></a><a href="#map" data-pg="map">Map</a><a href="#drivers" data-pg="drivers">Drivers</a><a href="#recruit" data-pg="recruit">Recruiting <span id="nRecruit" class="cnt"></span></a><a href="#equip" data-pg="equip">Trucks and trailers</a><a href="#maint" data-pg="maint">Maintenance</a><a href="#claims" data-pg="claims">Accidents &amp; claims <span id="nClaims" class="cnt"></span></a><a href="#ifta" data-pg="ifta">IFTA</a><a href="#edi" data-pg="edi">EDI tenders <span id="nEdi" class="cnt"></span></a><a href="#driver" data-pg="driver">Driver app</a><a href="#users" data-pg="users" id="navUsers" hidden>Users</a></nav>
 
   <div class="grid" id="pg_plan">
     <div class="col">
@@ -573,6 +573,14 @@ label.rc-ck small{display:block;color:var(--muted);font-size:11px}
     <div class="split"><h2 id="daH">Driver app</h2><span class="small muted">What the driver sees on his phone. Real sign-in comes later; for now pick the driver.</span></div>
     <div class="phone"><div id="drvApp" class="col" style="gap:10px"></div></div>
   </section>
+  <section id="pg_users" class="col" hidden aria-labelledby="usersH">
+    <div class="split"><h2 id="usersH">Users</h2><span class="small muted">Who can sign in and what they can see. Changes save as you make them.</span></div>
+    <section class="panel">
+      <div class="small">To add a person: create their login in <a href="https://supabase.com/dashboard/project/opogyzzqydxaljduafpl/auth/users" target="_blank" rel="noopener">Supabase, Authentication</a> (Add user, tick Auto Confirm). They show up here with no roles until you tick some. Nobody sees anything until they have a role.</div>
+      <div class="row" style="gap:8px;margin-top:8px;align-items:center"><button class="sm" id="usersRefresh">Refresh</button><span class="small muted" id="usersMsg"></span></div>
+    </section>
+    <div id="usersBody" class="col" style="gap:12px"></div>
+  </section>
   <section id="pg_edi" class="col" hidden aria-labelledby="ediH">
     <div class="split"><h2 id="ediH">EDI tenders</h2><span class="small muted">204 load tenders in, 990 accept or decline back out</span></div>
     <section class="panel">
@@ -636,7 +644,7 @@ const sb = window.supabase.createClient(LH_SUPABASE_URL, LH_SUPABASE_KEY, { auth
 
 let lhSession = null, lhProfile = null;
 const lhReady = new Promise(resolve => {
-  const go = async s => { lhSession = s; await loadProfile(); showLogin(false); resolve(s); };
+  const go = async s => { lhSession = s; await loadProfile(); showLogin(false); resolve(s); if (/^#users/.test(location.hash) && typeof renderUsers === "function") renderUsers(); };
   sb.auth.getSession().then(({ data }) => { if (data && data.session) go(data.session); else showLogin(true); });
   sb.auth.onAuthStateChange((ev, s) => { if (s && !lhSession) go(s); if (ev === "SIGNED_OUT") { lhSession = null; location.reload(); } });
 });
@@ -644,6 +652,7 @@ async function loadProfile() {
   try { const { data } = await sb.from("profiles").select("id,full_name,email,roles,is_admin").eq("id", lhSession.user.id).maybeSingle(); lhProfile = data; } catch (e) { lhProfile = null; }
   if (!lhProfile) { lhProfile = { id: lhSession.user.id, full_name: lhSession.user.email, roles: [], is_admin: false }; }
   const n = document.getElementById("lhWho"); if (n) n.textContent = lhProfile.full_name || lhSession.user.email;
+  const nu = document.getElementById("navUsers"); if (nu) nu.hidden = !lhProfile.is_admin;
 }
 function showLogin(on) {
   const o = document.getElementById("lhLogin"); if (!o) return; o.hidden = !on;
@@ -723,6 +732,38 @@ function blobUrl(id) {
 }
 
 const lhDownloads = { save: async ({ filename, data }) => { const b = new Blob([data], { type: "text/csv" }); const a = document.createElement("a"); a.href = URL.createObjectURL(b); a.download = filename; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000); } };
+
+
+/* --- Users tab (admin only) --- */
+const LH_ROLES = [["owner","Owner"],["dispatch","Dispatch / office"],["sales","Sales"],["billing","Billing / accounting"],["safety","Safety / driver manager"],["shop_lead","Shop lead"],["mechanic","Mechanic"],["driver","Driver"]];
+const lhEsc = v => String(v == null ? "" : v).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+let LH_USERS = [];
+async function renderUsers() {
+  const body = document.getElementById("usersBody"), msg = document.getElementById("usersMsg"); if (!body) return;
+  if (!lhProfile || !lhProfile.is_admin) { body.innerHTML = '<div class="empty">Admins only.</div>'; return; }
+  const { data, error } = await sb.from("profiles").select("id,full_name,email,roles,is_admin,active,created_at").order("active", { ascending: false }).order("full_name");
+  if (error) { body.innerHTML = '<div class="empty">Couldn\'t load users: ' + lhEsc(error.message) + '</div>'; return; }
+  LH_USERS = data || [];
+  if (msg) msg.textContent = LH_USERS.length + " login" + (LH_USERS.length === 1 ? "" : "s") + ", " + LH_USERS.filter(u => u.active).length + " active";
+  body.innerHTML = '<div class="tablewrap"><table><thead><tr><th>Name</th><th>Email</th>' + LH_ROLES.map(r => '<th style="text-align:center">' + lhEsc(r[1]) + '</th>').join("") + '<th style="text-align:center">Admin</th><th style="text-align:center">Active</th></tr></thead><tbody>' +
+    LH_USERS.map(u => '<tr data-uid="' + lhEsc(u.id) + '"' + (u.active ? '' : ' style="opacity:.55"') + '><td><input data-f="full_name" value="' + lhEsc(u.full_name) + '" style="min-width:160px"></td><td class="small">' + lhEsc(u.email || "") + (u.id === lhSession.user.id ? ' <span class="pill on">you</span>' : '') + '</td>' +
+      LH_ROLES.map(r => '<td style="text-align:center"><input type="checkbox" data-role="' + r[0] + '"' + ((u.roles || []).includes(r[0]) ? ' checked' : '') + '></td>').join("") +
+      '<td style="text-align:center"><input type="checkbox" data-f="is_admin"' + (u.is_admin ? ' checked' : '') + '></td><td style="text-align:center"><input type="checkbox" data-f="active"' + (u.active ? ' checked' : '') + '></td></tr>').join("") +
+    '</tbody></table></div><div class="small muted">A person with no roles can sign in but sees nothing. Drivers get the driver role only. Admin means they can manage this list.</div>';
+  body.querySelectorAll("tr[data-uid]").forEach(tr => {
+    const uid = tr.dataset.uid; const u = LH_USERS.find(x => x.id === uid);
+    const save = async () => {
+      const patch = { full_name: tr.querySelector('[data-f="full_name"]').value.trim(), roles: [...tr.querySelectorAll("[data-role]")].filter(c => c.checked).map(c => c.dataset.role), is_admin: tr.querySelector('[data-f="is_admin"]').checked, active: tr.querySelector('[data-f="active"]').checked };
+      const { error } = await sb.from("profiles").update(patch).eq("id", uid);
+      if (error) { if (msg) msg.textContent = error.message; renderUsers(); return; }
+      Object.assign(u, patch); tr.style.opacity = patch.active ? "" : ".55"; if (msg) msg.textContent = "Saved " + (patch.full_name || u.email);
+      if (uid === lhSession.user.id) { await loadProfile(); }
+    };
+    tr.querySelectorAll("input").forEach(inp => inp.addEventListener("change", save));
+  });
+}
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", () => { const b = document.getElementById("usersRefresh"); if (b) b.addEventListener("click", renderUsers); });
+else { const b = document.getElementById("usersRefresh"); if (b) b.addEventListener("click", renderUsers); }
 
 /* --- the shim the app calls --- */
 const claude = {
@@ -2872,8 +2913,8 @@ count();
 return {render,count};
 })();
 
-function showPage(){const h=decodeURIComponent((location.hash||"#plan").slice(1));const [pg,arg]=h.split("/");PAGE=["plan","loads","active","drivers","equip","maint","driver","edi","ifta","map","claims","crm","recruit"].includes(pg)?pg:"plan";if(PAGE==="driver"&&arg){AS_DRIVER=arg;try{localStorage.setItem("loadhunter.asDriver",arg)}catch(e){}}
-  $("#pg_plan").hidden=PAGE!=="plan";$("#pg_loads").hidden=PAGE!=="loads";$("#pg_active").hidden=PAGE!=="active";$("#pg_drivers").hidden=PAGE!=="drivers";$("#pg_equip").hidden=PAGE!=="equip";$("#pg_maint").hidden=PAGE!=="maint";$("#pg_driver").hidden=PAGE!=="driver";$("#pg_edi").hidden=PAGE!=="edi";$("#pg_ifta").hidden=PAGE!=="ifta";$("#pg_map").hidden=PAGE!=="map";$("#pg_claims").hidden=PAGE!=="claims";$("#pg_crm").hidden=PAGE!=="crm";$("#pg_recruit").hidden=PAGE!=="recruit";if(PAGE==="crm"){CRM_OPEN=arg&&CRM.co[arg]?arg:"";crmDelArm="";const ae=document.activeElement;if(ae&&ae.blur&&ae!==document.body)ae.blur()}if(PAGE==="claims"&&arg){const inc=CLAIMS.items.find(x=>x.no===arg);if(inc){CL_OPEN=inc.id;CL_VIEW="list";const st=$("#cl_status");if(st)st.value="all"}}
+function showPage(){const h=decodeURIComponent((location.hash||"#plan").slice(1));const [pg,arg]=h.split("/");PAGE=["plan","loads","active","drivers","equip","maint","driver","edi","ifta","map","claims","crm","recruit","users"].includes(pg)?pg:"plan";if(PAGE==="driver"&&arg){AS_DRIVER=arg;try{localStorage.setItem("loadhunter.asDriver",arg)}catch(e){}}
+  $("#pg_plan").hidden=PAGE!=="plan";$("#pg_loads").hidden=PAGE!=="loads";$("#pg_active").hidden=PAGE!=="active";$("#pg_drivers").hidden=PAGE!=="drivers";$("#pg_equip").hidden=PAGE!=="equip";$("#pg_maint").hidden=PAGE!=="maint";$("#pg_driver").hidden=PAGE!=="driver";$("#pg_edi").hidden=PAGE!=="edi";$("#pg_ifta").hidden=PAGE!=="ifta";$("#pg_map").hidden=PAGE!=="map";$("#pg_claims").hidden=PAGE!=="claims";$("#pg_crm").hidden=PAGE!=="crm";$("#pg_recruit").hidden=PAGE!=="recruit";$("#pg_users").hidden=PAGE!=="users";if(PAGE==="crm"){CRM_OPEN=arg&&CRM.co[arg]?arg:"";crmDelArm="";const ae=document.activeElement;if(ae&&ae.blur&&ae!==document.body)ae.blur()}if(PAGE==="claims"&&arg){const inc=CLAIMS.items.find(x=>x.no===arg);if(inc){CL_OPEN=inc.id;CL_VIEW="list";const st=$("#cl_status");if(st)st.value="all"}}
   document.querySelectorAll("nav.tabs a").forEach(a=>{if(a.dataset.pg===PAGE)a.setAttribute("aria-current","page");else a.removeAttribute("aria-current")});
   if(PAGE==="loads"&&arg){const b=BOOKED.find(x=>x.no===arg);if(b){OPEN.add(b.id);$("#bk_status").value="all";$("#bk_q").value=""}}
   if(PAGE==="plan"&&PLAN)render();else renderTms();
@@ -2882,7 +2923,7 @@ function showPage(){const h=decodeURIComponent((location.hash||"#plan").slice(1)
 }
 function navCounts(){{const nr=$("#nCrm");if(nr)nr.textContent=crmDueCount()||""}{const nc=$("#nClaims");if(nc)nc.textContent=CLAIMS.items.filter(i=>i.status!=="Closed").length||""}const ne=$("#nEdi");if(ne)ne.textContent=EDI.tenders.filter(t=>t.status==="New").length||"";const nb=BOOKED.filter(b=>b.status!=="Cancelled"&&b.status!=="Completed").length,na=BOOKED.filter(b=>LIVE.has(b.status)).length;
   const a=$("#nBooked"),c=$("#nActive");if(a)a.textContent=nb||"";if(c)c.textContent=na||""}
-function renderTms(){navCounts();renderSheetPill();renderDriverList();if(PAGE==="loads")renderBooked();if(PAGE==="active")renderActive();if(PAGE==="drivers")renderDrivers();if(PAGE==="equip")renderEquipDb();if(PAGE==="maint")renderMaint();if(PAGE==="claims")renderClaims();if(PAGE==="crm"){renderCrmLoadNos();renderCrm()}if(PAGE==="driver")renderDriverApp();if(PAGE==="recruit")RECRUIT.render();if(PAGE==="edi")renderEdi();if(PAGE==="map")renderMap();if(PAGE==="ifta"){renderIfta();if(mcp&&Date.now()-IFTA.readAt>300000)readIfta()}}
+function renderTms(){navCounts();renderSheetPill();renderDriverList();if(PAGE==="loads")renderBooked();if(PAGE==="active")renderActive();if(PAGE==="drivers")renderDrivers();if(PAGE==="equip")renderEquipDb();if(PAGE==="maint")renderMaint();if(PAGE==="claims")renderClaims();if(PAGE==="crm"){renderCrmLoadNos();renderCrm()}if(PAGE==="driver")renderDriverApp();if(PAGE==="recruit")RECRUIT.render();if(PAGE==="users")renderUsers();if(PAGE==="edi")renderEdi();if(PAGE==="map")renderMap();if(PAGE==="ifta"){renderIfta();if(mcp&&Date.now()-IFTA.readAt>300000)readIfta()}}
 function renderDriverList(){const dl=$("#driverList");if(!dl)return;const s=new Set();(S.drivers||[]).forEach(d=>d.name&&s.add(d.name));S.trucks.forEach(t=>t.driver&&s.add(t.driver));BOOKED.forEach(b=>b.driver&&s.add(b.driver));dl.innerHTML=[...s].sort().map(d=>'<option value="'+esc(d)+'">').join("")}
 
 function bkHead(b){const ns=nextStep(b),al=alertOf(b),pay=totalPay(b);
