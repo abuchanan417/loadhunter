@@ -781,6 +781,7 @@ else { const b = document.getElementById("usersRefresh"); if (b) b.addEventListe
 
 /* --- live telematics, faults and shop queue from the real tables --- */
 const TELE = { trucks: {}, faults: [], wos: [], loaded: false };
+let LH_LEADS = [];
 const lhAgo = at => { if (!at) return ""; const m = Math.round((Date.now() - new Date(at).getTime()) / 60000); return m < 1 ? "just now" : m < 60 ? m + " min ago" : m < 1440 ? Math.round(m / 60) + " hr ago" : Math.round(m / 1440) + " d ago"; };
 function lhLiveCell(unit) {
   const t = TELE.trucks[String(unit)]; if (!t) return '<span class="muted">-</span>';
@@ -793,19 +794,21 @@ function lhLiveCell(unit) {
 }
 async function lhTeleLoad() {
   if (!lhSession) return;
-  const [t, f, w] = await Promise.all([
+  const [t, f, w, a] = await Promise.all([
     sb.from("trucks").select("id,unit,status,last_lat,last_lng,last_speed,last_position_at,last_address,odometer,odometer_at,engine_hours,extra"),
     sb.from("truck_faults").select("*").in("status", ["new", "flagged"]).order("last_seen_at", { ascending: false }),
     sb.from("work_orders").select("id,wo_no,truck_id,trailer_id,wo_type,status,priority,truck_down,complaint,opened_at,eta_back,notes").not("status", "in", "(closed,cancelled)").order("opened_at", { ascending: false }),
+    sb.from("applicants").select("id,first_name,last_name,phone,email,city,state,source,applied_on,license_state,license_class,license_expires,medical_expires,hazmat,tanker,doubles,years_experience,notes").order("applied_on", { ascending: false }).limit(500),
   ]);
   TELE.trucks = {}; (t.data || []).forEach(x => TELE.trucks[String(x.unit)] = x);
   TELE.faults = f.data || []; TELE.wos = w.data || []; TELE.loaded = true;
+  LH_LEADS = a.data || [];
   if (window.lhRefresh) { try { window.lhRefresh(); } catch (e) { console.error(e); } }
 }
 let teleT = null; const teleSoon = () => { clearTimeout(teleT); teleT = setTimeout(lhTeleLoad, 400); };
 lhReady.then(() => {
   lhTeleLoad();
-  ["trucks", "truck_faults", "work_orders"].forEach(tb => sb.channel("tele-" + tb).on("postgres_changes", { event: "*", schema: "public", table: tb }, teleSoon).subscribe());
+  ["trucks", "truck_faults", "work_orders", "applicants"].forEach(tb => sb.channel("tele-" + tb).on("postgres_changes", { event: "*", schema: "public", table: tb }, teleSoon).subscribe());
   setInterval(lhTeleLoad, 120000);
 });
 const unitOfWo = w => { const u = Object.values(TELE.trucks).find(t => t.id === w.truck_id); return u ? u.unit : ""; };
@@ -3084,7 +3087,12 @@ document.addEventListener("change",e=>{
 document.addEventListener("input",e=>{if(e.target.id!=="rc_q")return;S.q=e.target.value;const p=e.target.selectionStart;render();const i=q("#rc_q");if(i){i.focus();i.setSelectionRange(p,p)}});
 document.addEventListener("keydown",e=>{if(e.key==="Enter"&&e.target.id==="rc_note"){e.preventDefault();const b=q('[data-rcact="note"]');if(b)b.click()}});
 count();
-return {render,count};
+function importLeads(list){let n=0;(list||[]).forEach(L=>{const key="db_"+L.id;if(RC.apps.some(a=>a.id===key))return;
+    const a={id:key,dbId:L.id,first:L.first_name||"",last:L.last_name||"",city:L.city||"—",st:(L.state||"").toUpperCase(),phone:L.phone||"",email:L.email||"",source:L.source==="transforce"?"TransForce":(L.source||"Lead"),stage:"new",applied:L.applied_on||TODAY,dob:null,ssn4:"????",
+      cdl:{st:(L.license_state||"").toUpperCase(),cls:L.license_class||"",no:"",exp:L.license_expires||TODAY,end:[L.hazmat?"H":null,L.tanker?"N":null,L.doubles?"T":null].filter(Boolean)},medExp:L.medical_expires||null,emp:[],inc:[],checks:{},notes:L.notes||"",
+      log:[{t:stamp(),by:"System",text:"Lead received from "+(L.source==="transforce"?"TransForce":(L.source||"lead email"))}]};
+    syncVer(a);RC.apps.unshift(a);n++});if(n){save();if(PAGE==="recruit")render()}return n}
+return {render,count,importLeads};
 })();
 
 function showPage(){const h=decodeURIComponent((location.hash||"#plan").slice(1));const [pg,arg]=h.split("/");PAGE=["plan","loads","active","drivers","equip","maint","driver","edi","ifta","map","claims","crm","recruit","users"].includes(pg)?pg:"plan";if(PAGE==="driver"&&arg){AS_DRIVER=arg;try{localStorage.setItem("loadhunter.asDriver",arg)}catch(e){}}
@@ -3611,7 +3619,7 @@ function lhApplyTele(){if(typeof TELE==="undefined")return 0;let ch=0;
     const fresh=l.last_position_at&&(Date.now()-new Date(l.last_position_at).getTime())<LH_AUTO_ACTIVE_DAYS*DAY;
     if(fresh&&(t.status||"Active")==="Out of service"){t.status="Active";t.autoActiveAt=new Date().toISOString();ch++}});
   if(ch){save();renderTrucks();try{buildPlan(true)}catch(e){}}return ch}
-window.lhRefresh=function(){try{lhApplyTele()}catch(e){console.error(e)}if(PAGE==="equip")renderEquipDb();if(PAGE==="maint")renderFaults();if(PAGE==="map"&&typeof lhFleetMap==="function")lhFleetMap()};
+window.lhRefresh=function(){try{lhApplyTele()}catch(e){console.error(e)}try{if(typeof LH_LEADS!=="undefined"&&LH_LEADS.length)RECRUIT.importLeads(LH_LEADS)}catch(e){console.error(e)}if(PAGE==="equip")renderEquipDb();if(PAGE==="maint")renderFaults();if(PAGE==="map"&&typeof lhFleetMap==="function")lhFleetMap()};
 })();</script>
 
 </body></html>
