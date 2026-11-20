@@ -1,6 +1,19 @@
 <!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<div id="lhLogin" hidden style="position:fixed;inset:0;z-index:9999;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:20px">
+  <form id="lhLoginForm" style="width:100%;max-width:360px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:24px;display:flex;flex-direction:column;gap:12px">
+    <div style="font-family:var(--display);font-size:28px;font-weight:700;letter-spacing:.5px">Load Hunter</div>
+    <div class="small muted">Trailiner Corp · sign in with your company login</div>
+    <label>Email<input name="email" type="email" autocomplete="username" required></label>
+    <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+    <button type="submit" class="primary" style="margin-top:4px">Sign in</button>
+    <div id="lhLoginMsg" class="small" style="color:var(--bad);min-height:1.2em"></div>
+  </form>
+</div>
+<div id="lhWhoBar" hidden style="position:fixed;right:10px;bottom:10px;z-index:900;display:flex;gap:8px;align-items:center;background:var(--surface);border:1px solid var(--line);border-radius:20px;padding:4px 6px 4px 12px;font-size:12px;box-shadow:0 2px 8px rgba(0,0,0,.12)"><span id="lhWho" class="muted"></span><button type="button" id="lhSignOut" class="sm">Sign out</button></div>
+
 <title>Load Hunter</title>
 <meta name="claude:viewport-fit-sides" content="cover">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.1/dist/umd/supabase.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
 <style>
@@ -612,6 +625,122 @@ label.rc-ck small{display:block;color:var(--muted);font-size:11px}
   <datalist id="driverList"></datalist>
 </div>
 
+<script>
+/* ---------- Load Hunter: Supabase bridge ----------
+   Replaces the Claude artifact platform (claude.use("db"/"user"/"assets"/...)
+   with Supabase logins, a shared cloud store, and file storage.
+   The main app code below this block is unchanged. */
+const LH_SUPABASE_URL = "https://opogyzzqydxaljduafpl.supabase.co";
+const LH_SUPABASE_KEY = "sb_publishable_4GgykGRQUylIuZdYwd6g3A_S49GjtPY";
+const sb = window.supabase.createClient(LH_SUPABASE_URL, LH_SUPABASE_KEY, { auth: { persistSession: true, autoRefreshToken: true } });
+
+let lhSession = null, lhProfile = null;
+const lhReady = new Promise(resolve => {
+  const go = async s => { lhSession = s; await loadProfile(); showLogin(false); resolve(s); };
+  sb.auth.getSession().then(({ data }) => { if (data && data.session) go(data.session); else showLogin(true); });
+  sb.auth.onAuthStateChange((ev, s) => { if (s && !lhSession) go(s); if (ev === "SIGNED_OUT") { lhSession = null; location.reload(); } });
+});
+async function loadProfile() {
+  try { const { data } = await sb.from("profiles").select("id,full_name,email,roles,is_admin").eq("id", lhSession.user.id).maybeSingle(); lhProfile = data; } catch (e) { lhProfile = null; }
+  if (!lhProfile) { lhProfile = { id: lhSession.user.id, full_name: lhSession.user.email, roles: [], is_admin: false }; }
+  const n = document.getElementById("lhWho"); if (n) n.textContent = lhProfile.full_name || lhSession.user.email;
+}
+function showLogin(on) {
+  const o = document.getElementById("lhLogin"); if (!o) return; o.hidden = !on;
+  const who = document.getElementById("lhWhoBar"); if (who) who.hidden = on;
+}
+function wireLogin() {
+  const f = document.getElementById("lhLoginForm"), msg = document.getElementById("lhLoginMsg"); if (!f) return;
+  f.addEventListener("submit", async e => {
+    e.preventDefault(); msg.textContent = "Signing in...";
+    const email = f.elements.email.value.trim(), password = f.elements.password.value;
+    const { error } = await sb.auth.signInWithPassword({ email, password });
+    msg.textContent = error ? (error.message || "Couldn't sign in.") : "";
+  });
+  const out = document.getElementById("lhSignOut"); if (out) out.addEventListener("click", () => sb.auth.signOut());
+}
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", wireLogin); else wireLogin();
+
+/* --- shared store: every "data/users/<id>" path becomes one company store --- */
+const mapCol = p => String(p).replace(/^data\/users\/[^/]+$/, "data/company");
+const docSnap = row => ({ exists: !!row, id: row ? row.doc_id : undefined, data: () => (row ? row.data : undefined), metadata: { fromCache: false } });
+const lhErr = e => { const err = new Error(e && e.message || "db error"); err.code = e && e.code === "42501" ? "revoked" : (e && e.code) || "error"; return err; };
+let chanN = 0;
+function subscribe(col, onChange) {
+  const ch = sb.channel("docs-" + (++chanN)).on("postgres_changes", { event: "*", schema: "public", table: "app_docs", filter: "collection=eq." + col }, onChange).subscribe();
+  return () => sb.removeChannel(ch);
+}
+class LhDoc {
+  constructor(col, id) { this.col = col; this.id = id; }
+  async set(data) { const { error } = await sb.from("app_docs").upsert({ collection: this.col, doc_id: this.id, data: JSON.parse(JSON.stringify(data)) }); if (error) throw lhErr(error); }
+  async get() { const { data, error } = await sb.from("app_docs").select("doc_id,data").eq("collection", this.col).eq("doc_id", this.id).maybeSingle(); if (error) throw lhErr(error); return docSnap(data); }
+  async delete() { const { error } = await sb.from("app_docs").delete().eq("collection", this.col).eq("doc_id", this.id); if (error) throw lhErr(error); }
+  onSnapshot(cb, err) {
+    let last = null; const pull = async () => { try { const s = await this.get(); const j = JSON.stringify(s.exists ? s.data() : null); if (j === last) return; last = j; cb(s); } catch (e) { if (err) err(e); } };
+    pull(); return subscribe(this.col, p => { const r = (p.new && p.new.doc_id) || (p.old && p.old.doc_id); if (r === this.id) pull(); });
+  }
+}
+class LhCol {
+  constructor(col) { this.col = col; }
+  doc(id) { return new LhDoc(this.col, id); }
+  async get() { const { data, error } = await sb.from("app_docs").select("doc_id,data").eq("collection", this.col); if (error) throw lhErr(error); return this._q(data || []); }
+  _q(rows) { const docs = rows.map(r => ({ id: r.doc_id, data: () => r.data, exists: true })); return { docs, empty: !docs.length, size: docs.length, metadata: { fromCache: false }, forEach: f => docs.forEach(f) }; }
+  onSnapshot(cb, err) {
+    let t = null; const pull = async () => { try { cb(await this.get()); } catch (e) { if (err) err(e); } };
+    pull(); return subscribe(this.col, () => { clearTimeout(t); t = setTimeout(pull, 250); });
+  }
+}
+const lhDb = { collection: p => new LhCol(mapCol(p)) };
+
+const lhUser = {
+  id: async () => lhSession.user.id,
+  me: async () => ({ id: lhSession.user.id, name: lhProfile.full_name || lhSession.user.email, email: lhSession.user.email, roles: lhProfile.roles || [], isAdmin: !!lhProfile.is_admin }),
+  canEdit: async () => true,
+  profiles: async ids => { const { data } = await sb.from("profiles").select("id,full_name").in("id", ids); const o = {}; (data || []).forEach(p => o[p.id] = { id: p.id, name: p.full_name, isMe: p.id === lhSession.user.id }); return o; },
+  search: async q => { let r = sb.from("profiles").select("id,full_name").eq("active", true).limit(10); if (q) r = r.ilike("full_name", "%" + q + "%"); const { data } = await r; return (data || []).map(p => ({ id: p.id, name: p.full_name, isMe: p.id === lhSession.user.id })); }
+};
+
+/* --- files: photos, voice notes --- */
+const extOf = t => ({ "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "video/webm": "webm", "audio/webm": "webm", "video/mp4": "mp4", "audio/mp4": "m4a", "application/pdf": "pdf" })[String(t || "").split(";")[0]] || "bin";
+const lhAssets = {
+  upload: async blob => {
+    const id = new Date().toISOString().slice(0, 10) + "/" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7) + "." + extOf(blob.type);
+    const { error } = await sb.storage.from("assets").upload(id, blob, { contentType: blob.type || "application/octet-stream", upsert: false });
+    if (error) { const e = new Error(error.message); e.code = "upload_failed"; throw e; }
+    return { id };
+  }
+};
+const BLOB_URLS = {}; let blobT = null; const blobWait = new Set();
+function blobUrl(id) {
+  if (BLOB_URLS[id]) return BLOB_URLS[id];
+  blobWait.add(id); clearTimeout(blobT);
+  blobT = setTimeout(async () => {
+    const ids = [...blobWait]; blobWait.clear();
+    try { const { data } = await sb.storage.from("assets").createSignedUrls(ids, 3600); (data || []).forEach(d => { if (d.signedUrl) BLOB_URLS[d.path] = d.signedUrl; }); } catch (e) { }
+    document.querySelectorAll("[data-blob]").forEach(el => { const u = BLOB_URLS[el.dataset.blob]; if (!u) return; if (el.tagName === "A") el.href = u; else el.src = u; });
+  }, 50);
+  return "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
+}
+
+const lhDownloads = { save: async ({ filename, data }) => { const b = new Blob([data], { type: "text/csv" }); const a = document.createElement("a"); a.href = URL.createObjectURL(b); a.download = filename; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000); } };
+
+/* --- the shim the app calls --- */
+const claude = {
+  use: async name => {
+    await lhReady;
+    switch (name) {
+      case "db": return lhDb;
+      case "user": return lhUser;
+      case "assets": return lhAssets;
+      case "downloads": return lhDownloads;
+      case "sample": return null;   /* AI calls move to the server next */
+      case "mcp": return null;      /* Google Sheet retired; loads live in the database */
+      default: return null;
+    }
+  }
+};
+/* ---------- end bridge ---------- */
+</script>
 <script>
 (function(){
 "use strict";
@@ -1433,7 +1562,7 @@ async function uploadPhotos(files,msgEl){
   if(!assets){if(msgEl)msgEl.textContent="Photo uploads aren't available in this view.";return[]}
   const ids=[];for(const f of [...files].slice(0,12)){try{if(msgEl)msgEl.textContent="Uploading "+(ids.length+1)+" of "+Math.min(files.length,12)+"...";const b=await shrinkPhoto(f);const a=await assets.upload(b);ids.push(a.id)}catch(e){if(msgEl)msgEl.textContent="Couldn't upload "+f.name+(e&&e.code?" ("+e.code+")":"")}}
   if(msgEl&&ids.length)msgEl.textContent=ids.length+" photo"+(ids.length>1?"s":"")+" saved.";return ids}
-const thumbs=ids=>(ids||[]).length?'<div class="thumbs">'+ids.map(id=>'<a href="/_blob/'+encodeURIComponent(id)+'" target="_blank" rel="noopener"><img src="/_blob/'+encodeURIComponent(id)+'" alt="Maintenance photo" loading="lazy"></a>').join("")+'</div>':"";
+const thumbs=ids=>(ids||[]).length?'<div class="thumbs">'+ids.map(id=>'<a href="'+blobUrl(id)+'" data-blob="'+esc(id)+'" target="_blank" rel="noopener"><img src="'+blobUrl(id)+'" data-blob="'+esc(id)+'" alt="Maintenance photo" loading="lazy"></a>').join("")+'</div>':"";
 let MOPEN="",MVIEW="trucks",MPRE="",MDEL="";
 function mItems(){
   if(MVIEW==="trailers")return(S.trailers||[]).map(r=>({key:keyR(r),kind:"trailer",label:"Trailer "+(r.no||"(no #)"),sub:[r.type,r.reefer].filter(Boolean).join(" · ")}));
@@ -1780,7 +1909,7 @@ async function startVoice(btn,msg,onDone,box){
   if(rec)rec.start();if(sr){sr._want=true;try{sr.start()}catch(e){}}
   btn.textContent="Stop recording";msg.textContent="Recording"+(sr?" and writing it out":"")+"... talk, then tap Stop.";
 }
-const voiceTag=id=>'<audio controls preload="none" src="/_blob/'+encodeURIComponent(id)+'" style="width:100%;max-width:320px;height:36px"></audio>';
+const voiceTag=id=>'<audio controls preload="none" src="'+blobUrl(id)+'" data-blob="'+esc(id)+'" style="width:100%;max-width:320px;height:36px"></audio>';
 let AS_DRIVER="";
 function drvEvent(b,type,extra){ensureDisp(b);const ev=Object.assign({id:rid(),type,at:Date.now(),by:AS_DRIVER},extra||{});b.events.push(ev);if(type!=="doc"&&type!=="override")stampLoc(b,ev);if(extra&&extra.temp)snapTemp(b);const c=b.checks;
   if(type==="dep_pick"){c.dispatched=true;c.picked=true}if(type==="arr_pick"){c.dispatched=true}if(type==="dep_del"){c.dispatched=true;c.picked=true;c.delivered=true}
