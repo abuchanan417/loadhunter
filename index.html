@@ -14,6 +14,9 @@
 <title>Load Hunter</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.119.2/dist/umd/supabase.min.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>#fleetMap{height:560px;border:1px solid var(--line);border-radius:6px;background:var(--sunk)} .lh-unit{background:var(--surface);color:var(--fg);border:2px solid var(--line);border-radius:12px;padding:1px 6px;font:600 12px var(--mono);white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,.25)} .lh-unit.moving{border-color:var(--good)} .lh-unit.stale{opacity:.55} .lh-unit.fault{border-color:var(--bad)} .leaflet-popup-content{font:13px var(--body);color:#17201b} .leaflet-popup-content .lbl{font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:#5a6a60;margin-top:6px}</style>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
 <style>
@@ -605,7 +608,15 @@ label.rc-ck small{display:block;color:var(--muted);font-size:11px}
     </details></section>
   </section>
   <section id="pg_map" class="col" hidden aria-labelledby="mapH">
-    <div class="split"><h2 id="mapH">Map</h2><span class="small muted" id="mapCounts"></span></div>
+    <div class="split"><h2>Live fleet <span class="small muted" id="fleetCnt"></span></h2><span class="small muted">Every truck reporting to ISAAC. Updates as positions come in. Click a truck for its last 24 hours.</span></div>
+    <div class="actions mapbar">
+      <select id="fleetShow" style="width:auto"><option value="24h">Reporting in last 24 hrs</option><option value="7d">Reporting in last 7 days</option><option value="all">All reporting</option><option value="moving">Moving now</option></select>
+      <input id="fleetQ" placeholder="Find a unit" style="width:140px">
+      <button class="sm" id="fleetFit">Fit all</button>
+      <span class="small muted" id="fleetMsg"></span>
+    </div>
+    <div id="fleetMap"></div>
+    <div class="split" style="margin-top:14px"><h2 id="mapH">Loads map</h2><span class="small muted" id="mapCounts"></span></div>
     <div class="actions mapbar">
       <label class="chk"><input type="checkbox" data-mf="ship"><svg width="14" height="14" aria-hidden="true"><rect x="1" y="1" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="2"/></svg> Shippers</label>
       <label class="chk"><input type="checkbox" data-mf="recv"><svg width="14" height="14" aria-hidden="true"><circle cx="7" cy="7" r="5.5" fill="none" stroke="currentColor" stroke-width="2"/></svg> Receivers</label>
@@ -856,6 +867,75 @@ function lhIsaacBlock(unit, gps) {
     '</div><div class="lbl" style="margin-top:8px">Fault codes ' + (faults.length ? '<span class="pill ' + (faults.some(f => f.status === "new") ? 'bad' : 'info') + '">' + faults.length + '</span>' : '') + '</div>' +
     (faults.length ? '<div class="tablewrap" style="max-height:none"><table><thead><tr><th>Unit</th><th>Code</th><th>What</th><th>Lamp</th><th>Seen</th><th>Status</th><th></th></tr></thead><tbody>' + lhFaultRows(faults, lhCanAct()) + '</tbody></table></div>' : '<div class="small muted">No open fault codes.</div>');
 }
+/* --- live fleet map (Leaflet + OpenStreetMap) --- */
+const FLEET = { map: null, layer: null, trail: null, markers: {}, show: "24h", q: "", fitted: false, wired: false };
+const fleetAge = t => t.last_position_at ? (Date.now() - new Date(t.last_position_at).getTime()) : Infinity;
+function fleetVisible(t) {
+  if (t.last_lat == null || t.last_lng == null) return false;
+  if (FLEET.q && !String(t.unit).toLowerCase().includes(FLEET.q)) return false;
+  const age = fleetAge(t);
+  if (FLEET.show === "24h") return age < 86400000;
+  if (FLEET.show === "7d") return age < 7 * 86400000;
+  if (FLEET.show === "moving") return age < 3600000 && (t.last_speed || 0) > 3;
+  return true;
+}
+function fleetPopup(t) {
+  const faults = TELE.faults.filter(f => f.unit === String(t.unit));
+  const feed = (typeof FEEDS_UNITS === "object" && FEEDS_UNITS[String(t.unit)]) || null;
+  return '<div style="min-width:220px"><b style="font-size:15px">Unit ' + lhEsc(t.unit) + '</b>' +
+    (t.last_speed > 3 ? ' <span style="color:#0d6b3c">● moving ' + Math.round(t.last_speed) + ' mph</span>' : ' <span style="color:#5a6a60">● parked</span>') +
+    '<div class="lbl">Where</div>' + lhEsc(t.last_address || (t.last_lat.toFixed(3) + ", " + t.last_lng.toFixed(3))) + ' <span style="color:#5a6a60">' + lhAgo(t.last_position_at) + '</span>' +
+    (t.odometer != null ? '<div class="lbl">Odometer</div>' + Math.round(t.odometer).toLocaleString() + ' mi' + (t.engine_hours != null ? ' · ' + Math.round(t.engine_hours).toLocaleString() + ' hrs' : '') : '') +
+    (faults.length ? '<div class="lbl">Faults</div><span style="color:#a3271c">' + faults.length + ' open: ' + lhEsc(faults.map(f => f.code).join(", ")) + '</span>' : '') +
+    '<div class="lbl">Links</div><a href="https://www.google.com/maps?q=' + t.last_lat + ',' + t.last_lng + '" target="_blank" rel="noopener">Google Maps</a> · <a href="#equip" onclick="FLEET_GO(\'' + lhEsc(t.unit) + '\')">Truck details</a> · <a href="#" onclick="return lhTrail(\'' + lhEsc(t.unit) + '\')">Last 24 hrs</a></div>';
+}
+window.FLEET_GO = unit => { const q = document.getElementById("eqQ"); if (q) { q.value = unit; q.dispatchEvent(new Event("input")); } };
+async function lhTrail(unit) {
+  if (!FLEET.map) return false;
+  const since = new Date(Date.now() - 86400000).toISOString();
+  const { data } = await sb.from("truck_positions").select("lat,lng,at,speed").eq("unit", String(unit)).gte("at", since).order("at");
+  if (FLEET.trail) { FLEET.map.removeLayer(FLEET.trail); FLEET.trail = null; }
+  const pts = (data || []).map(p => [p.lat, p.lng]);
+  const msg = document.getElementById("fleetMsg");
+  if (pts.length < 2) { if (msg) msg.textContent = "Unit " + unit + ": no trail in the last 24 hours."; return false; }
+  try { FLEET.trail = L.polyline(pts, { color: "#1f4f8a", weight: 4, opacity: .8 }).addTo(FLEET.map); FLEET.map.fitBounds(FLEET.trail.getBounds().pad(0.2)); }
+  catch (e) { console.error(e); if (msg) msg.textContent = "Couldn't draw the trail."; return false; }
+  if (msg) msg.textContent = "Unit " + unit + ": " + pts.length + " positions in the last 24 hours.";
+  return false;
+}
+function lhFleetMap() {
+  const el = document.getElementById("fleetMap"); if (!el || !window.L) return;
+  if (!FLEET.map) {
+    FLEET.map = L.map(el, { zoomControl: true }).setView([37.2262, -93.2648], 5);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 18, attribution: "&copy; OpenStreetMap" }).addTo(FLEET.map);
+    L.marker([37.2262, -93.2648], { icon: L.divIcon({ className: "", html: '<div class="lh-unit" style="border-color:var(--fg)">YARD</div>', iconSize: null }) }).addTo(FLEET.map).bindPopup("Trailiner yard, 2169 E Blaine St, Springfield, MO");
+    FLEET.layer = L.layerGroup().addTo(FLEET.map);
+  }
+  if (!FLEET.wired) {
+    FLEET.wired = true;
+    const sh = document.getElementById("fleetShow"), q = document.getElementById("fleetQ"), fit = document.getElementById("fleetFit");
+    if (sh) sh.addEventListener("change", () => { FLEET.show = sh.value; FLEET.fitted = false; lhFleetMap(); });
+    if (q) q.addEventListener("input", () => { FLEET.q = q.value.trim().toLowerCase(); FLEET.fitted = false; lhFleetMap(); });
+    if (fit) fit.addEventListener("click", () => { FLEET.fitted = false; lhFleetMap(); });
+  }
+  setTimeout(() => FLEET.map.invalidateSize(), 50);
+  const list = Object.values(TELE.trucks).filter(fleetVisible);
+  const seen = new Set();
+  list.forEach(t => {
+    const u = String(t.unit); seen.add(u);
+    const age = fleetAge(t), moving = age < 3600000 && (t.last_speed || 0) > 3, stale = age > 86400000;
+    const faults = TELE.faults.some(f => f.unit === u);
+    const icon = L.divIcon({ className: "", html: '<div class="lh-unit' + (moving ? " moving" : "") + (stale ? " stale" : "") + (faults ? " fault" : "") + '">' + lhEsc(u) + (faults ? " !" : "") + '</div>', iconSize: null, iconAnchor: [18, 10] });
+    let m = FLEET.markers[u];
+    if (!m) { m = L.marker([t.last_lat, t.last_lng], { icon }).addTo(FLEET.layer); FLEET.markers[u] = m; }
+    else { m.setLatLng([t.last_lat, t.last_lng]); m.setIcon(icon); }
+    m.bindPopup(fleetPopup(t), { maxWidth: 320 });
+  });
+  Object.keys(FLEET.markers).forEach(u => { if (!seen.has(u)) { FLEET.layer.removeLayer(FLEET.markers[u]); delete FLEET.markers[u]; } });
+  const c = document.getElementById("fleetCnt"); if (c) c.textContent = list.length + " of " + Object.values(TELE.trucks).filter(t => t.last_lat != null).length + " trucks" + (list.filter(t => fleetAge(t) < 3600000 && (t.last_speed || 0) > 3).length ? ", " + list.filter(t => fleetAge(t) < 3600000 && (t.last_speed || 0) > 3).length + " moving" : "");
+  if (!FLEET.fitted && list.length) { FLEET.fitted = true; FLEET.map.fitBounds(L.latLngBounds(list.map(t => [t.last_lat, t.last_lng])).pad(0.15), { maxZoom: 9 }); }
+}
+
 /* --- the shim the app calls --- */
 const claude = {
   use: async name => {
@@ -2370,7 +2450,7 @@ function albers(lon,lat){let l=(lon+96)*AR;if(l>Math.PI)l-=2*Math.PI;const p=alb
 let MAPF={ship:true,recv:true,truck:true,st:{ok:true,risk:true,late:true,unknown:true},unit:"",sel:""};
 try{const v=JSON.parse(localStorage.getItem("loadhunter.mapf")||"null");if(v)MAPF=Object.assign(MAPF,v,{sel:""})}catch(e){}
 function renderMap(){
-  const box=$("#mapSvg");if(!box)return;
+  if(typeof lhFleetMap==="function"){try{lhFleetMap()}catch(e){console.error(e)}}const box=$("#mapSvg");if(!box)return;
   const loads=BOOKED.filter(b=>b.status!=="Cancelled"&&b.status!=="Completed"&&!b.checks.delivered).map(b=>({b,t:loadTiming(b)})).filter(x=>x.t.state!=="done");
   geocodeStops(loads.map(x=>x.b).filter(b=>{const d=ensureDisp(b).disp;return(d.shipperAddr&&!(d.shipperGeo&&d.shipperGeo.for===d.shipperAddr))||(d.consigneeAddr&&!(d.consigneeGeo&&d.consigneeGeo.for===d.consigneeAddr))||!stopGeo(b,"pick")||!stopGeo(b,"drop")}));
   const units=[...new Set(loads.map(x=>x.b.unit).filter(Boolean))].sort();
@@ -3531,7 +3611,7 @@ function lhApplyTele(){if(typeof TELE==="undefined")return 0;let ch=0;
     const fresh=l.last_position_at&&(Date.now()-new Date(l.last_position_at).getTime())<LH_AUTO_ACTIVE_DAYS*DAY;
     if(fresh&&(t.status||"Active")==="Out of service"){t.status="Active";t.autoActiveAt=new Date().toISOString();ch++}});
   if(ch){save();renderTrucks();try{buildPlan(true)}catch(e){}}return ch}
-window.lhRefresh=function(){try{lhApplyTele()}catch(e){console.error(e)}if(PAGE==="equip")renderEquipDb();if(PAGE==="maint")renderFaults()};
+window.lhRefresh=function(){try{lhApplyTele()}catch(e){console.error(e)}if(PAGE==="equip")renderEquipDb();if(PAGE==="maint")renderFaults();if(PAGE==="map"&&typeof lhFleetMap==="function")lhFleetMap()};
 })();</script>
 
 </body></html>
