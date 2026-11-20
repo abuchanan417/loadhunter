@@ -2415,7 +2415,7 @@ function wireFleetDb(){
   $("#trkAdd").addEventListener("click",()=>{$("#truckPlus").click();renderEquipDb()});
 }
 /* ---------- driver feeds: GPS + HOS (placeholders until an ELD is connected) ---------- */
-const FEED_SRC=[["none","Not connected"],["manual","Manual entry"],["samsara","Samsara"],["motive","Motive (KeepTruckin)"],["geotab","Geotab"],["omnitracs","Omnitracs"],["other","Other ELD"]];
+const FEED_SRC=[["none","Not connected"],["manual","Manual entry"],["isaac","ISAAC (live)"],["samsara","Samsara"],["motive","Motive (KeepTruckin)"],["geotab","Geotab"],["omnitracs","Omnitracs"],["other","Other ELD"]];
 const ago=at=>{const m=Math.round((Date.now()-new Date(at).getTime())/60000);return isNaN(m)?"":m<0?"as of "+fmtD(new Date(at).getTime()):m<60?m+" min ago":m<1440?Math.round(m/60)+" hr ago":Math.round(m/1440)+" days ago"};
 function feedPill(f){if(!f||f.src==="none")return'<span class="pill">Not connected</span>';
   if(f.live&&f.at)return'<span class="pill on">Live · '+esc(ago(f.at))+'</span>';
