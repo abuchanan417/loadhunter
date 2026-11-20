@@ -555,7 +555,7 @@ label.rc-ck small{display:block;color:var(--muted);font-size:11px}
 
   <section id="pg_equip" class="col" hidden aria-labelledby="eqdbH">
     <section class="panel"><div class="hd"><h2>Import from Ditat</h2></div><div class="small muted">Pick the Ditat exports for trucks, trailers and drivers (CSV). The page reads them here in your browser and never keeps SSN or bank account columns. Running it again updates matching unit, trailer and driver IDs instead of making duplicates. New trucks come in Out of service; set the ones you run to Active.</div><div class="actions"><label class="btn pri sm">Pick Ditat CSVs<input type="file" data-imp accept=".csv,text/csv" multiple hidden></label><span class="small" data-impmsg></span></div></section>
-    <div class="actions"><input id="eqQ" placeholder="Find a unit, trailer, VIN or plate" style="width:260px"><select id="eqSt" style="width:auto" aria-label="Truck status"><option value="all">All trucks</option><option>Active</option><option>Shop</option><option>Out of service</option><option>Sold</option></select></div>
+    <div class="actions"><input id="eqQ" placeholder="Find a unit, trailer, VIN or plate" style="width:260px"><select id="eqSt" style="width:auto" aria-label="Truck status"><option value="all">All trucks</option><option>Active</option><option>Shop</option><option>Out of service</option><option>Sold</option><option value="live">Reporting to ISAAC</option><option value="nolive">Not reporting</option><option value="faults">With open faults</option></select><select id="eqSort" style="width:auto" aria-label="Sort trucks"><option value="unit">Sort: unit</option><option value="ping">Sort: last ping</option><option value="odo">Sort: odometer</option><option value="year">Sort: year</option><option value="status">Sort: status</option></select></div>
     <div class="split"><h2 id="eqdbH">Trucks <span class="small muted" id="trkCnt"></span></h2><button class="sm" id="trkAdd">Add truck</button></div>
     <div class="small muted">Trucks in Shop, Out of service or Sold stay off the planner. Unit number, trailer type and driver are set on Plan rounds.</div>
     <div class="tablewrap" style="max-height:none"><table style="min-width:1200px"><thead><tr><th>Unit</th><th>Status</th><th>Year</th><th>Make / model</th><th>VIN</th><th>Plate</th><th>Owner</th><th>ELD device</th><th>Runs</th><th>Trailer</th><th>Driver</th><th>Live (ISAAC)</th><th>Notes</th><th></th></tr></thead><tbody id="trkTable"></tbody></table></div>
@@ -783,13 +783,13 @@ function lhLiveCell(unit) {
 async function lhTeleLoad() {
   if (!lhSession) return;
   const [t, f, w] = await Promise.all([
-    sb.from("trucks").select("id,unit,status,last_lat,last_lng,last_speed,last_position_at,last_address,odometer,odometer_at,engine_hours"),
+    sb.from("trucks").select("id,unit,status,last_lat,last_lng,last_speed,last_position_at,last_address,odometer,odometer_at,engine_hours,extra"),
     sb.from("truck_faults").select("*").in("status", ["new", "flagged"]).order("last_seen_at", { ascending: false }),
     sb.from("work_orders").select("id,wo_no,truck_id,trailer_id,wo_type,status,priority,truck_down,complaint,opened_at,eta_back,notes").not("status", "in", "(closed,cancelled)").order("opened_at", { ascending: false }),
   ]);
   TELE.trucks = {}; (t.data || []).forEach(x => TELE.trucks[String(x.unit)] = x);
   TELE.faults = f.data || []; TELE.wos = w.data || []; TELE.loaded = true;
-  if (typeof PAGE !== "undefined") { if (PAGE === "equip" && typeof renderEquipDb === "function") renderEquipDb(); if (PAGE === "maint") renderFaults(); }
+  if (window.lhRefresh) { try { window.lhRefresh(); } catch (e) { console.error(e); } }
 }
 let teleT = null; const teleSoon = () => { clearTimeout(teleT); teleT = setTimeout(lhTeleLoad, 400); };
 lhReady.then(() => {
@@ -803,19 +803,8 @@ function renderFaults() {
   const canAct = lhProfile && (lhProfile.is_admin || (lhProfile.roles || []).some(r => ["dispatch", "shop_lead", "safety", "owner"].includes(r)));
   const fc = document.getElementById("faultsCnt"); if (fc) fc.textContent = TELE.faults.length ? TELE.faults.length + " open" : "";
   fb.innerHTML = !TELE.loaded ? '<div class="muted small">Loading...</div>' : !TELE.faults.length ? '<div class="empty">No open fault codes. ISAAC checks every 5 minutes.</div>' :
-    '<div class="tablewrap" style="max-height:none"><table><thead><tr><th>Unit</th><th>Code</th><th>What</th><th>Lamp</th><th>Seen</th><th>Status</th><th></th></tr></thead><tbody>' +
-    TELE.faults.map(f => '<tr><td class="num"><b>' + lhEsc(f.unit) + '</b></td><td class="num">' + lhEsc(f.code) + '</td><td class="small">' + lhEsc([f.description, f.fmi_description].filter(Boolean).join(" · ")) + (f.source_desc ? ' <span class="muted">(' + lhEsc(f.source_desc) + ')</span>' : '') + '</td><td>' + (f.lamp ? '<span class="pill ' + (/red|stop/i.test(f.lamp) ? 'bad' : 'warn') + '">' + lhEsc(f.lamp) + '</span>' : '') + '</td><td class="small">' + lhAgo(f.last_seen_at) + (f.occurrences > 1 ? ' <span class="muted">' + f.occurrences + 'x</span>' : '') + '</td><td>' +
-      (f.status === "flagged" ? '<span class="pill info">In shop queue</span>' : '<span class="pill warn">New</span>') + '</td><td><span class="actions" style="flex-wrap:nowrap">' +
-      (canAct && f.status === "new" ? '<button class="sm pri" data-flag="' + f.id + '">Flag to shop</button><button class="sm" data-dismiss="' + f.id + '">Dismiss</button>' : '') + '</span></td></tr>').join("") + '</tbody></table></div>';
-  fb.querySelectorAll("[data-flag]").forEach(b => b.addEventListener("click", async () => {
-    b.disabled = true; const { error } = await sb.rpc("flag_fault", { p_fault: b.dataset.flag, p_priority: "high" });
-    if (error) { alert("Couldn't flag it: " + error.message); b.disabled = false; return; } lhTeleLoad();
-  }));
-  fb.querySelectorAll("[data-dismiss]").forEach(b => b.addEventListener("click", async () => {
-    const why = prompt("Dismiss this code. Reason (optional):"); if (why === null) return;
-    const { error } = await sb.rpc("dismiss_fault", { p_fault: b.dataset.dismiss, p_reason: why || null });
-    if (error) { alert("Couldn't dismiss it: " + error.message); return; } lhTeleLoad();
-  }));
+    '<div class="tablewrap" style="max-height:none"><table><thead><tr><th>Unit</th><th>Code</th><th>What</th><th>Lamp</th><th>Seen</th><th>Status</th><th></th></tr></thead><tbody>' + lhFaultRows(TELE.faults, canAct) + '</tbody></table></div>';
+  lhWireFaultButtons(fb);
   if (!sbx) return;
   const sc = document.getElementById("shopCnt"); if (sc) sc.textContent = TELE.wos.length ? TELE.wos.length + " open" : "";
   const ST = [["open", "Open"], ["in_progress", "In progress"], ["waiting_parts", "Waiting on parts"], ["waiting_vendor", "Waiting on vendor"], ["done", "Done"], ["closed", "Closed"], ["cancelled", "Cancelled"]];
@@ -830,6 +819,43 @@ function renderFaults() {
   }));
 }
 
+/* --- ISAAC block in truck details, auto-active, fill blanks --- */
+function lhFaultRows(list, canAct) {
+  return list.map(f => '<tr><td class="num"><b>' + lhEsc(f.unit) + '</b></td><td class="num">' + lhEsc(f.code) + '</td><td class="small">' + lhEsc([f.description, f.fmi_description].filter(Boolean).join(" · ")) + (f.source_desc ? ' <span class="muted">(' + lhEsc(f.source_desc) + ')</span>' : '') + '</td><td>' + (f.lamp ? '<span class="pill ' + (/red|stop/i.test(f.lamp) ? 'bad' : 'warn') + '">' + lhEsc(f.lamp) + '</span>' : '') + '</td><td class="small">' + lhAgo(f.last_seen_at) + (f.occurrences > 1 ? ' <span class="muted">' + f.occurrences + 'x</span>' : '') + '</td><td>' +
+    (f.status === "flagged" ? '<span class="pill info">In shop queue</span>' : '<span class="pill warn">New</span>') + '</td><td><span class="actions" style="flex-wrap:nowrap">' +
+    (canAct && f.status === "new" ? '<button class="sm pri" data-flag="' + f.id + '">Flag to shop</button><button class="sm" data-dismiss="' + f.id + '">Dismiss</button>' : '') + '</span></td></tr>').join("");
+}
+const lhCanAct = () => !!(lhProfile && (lhProfile.is_admin || (lhProfile.roles || []).some(r => ["dispatch", "shop_lead", "safety", "owner"].includes(r))));
+function lhWireFaultButtons(root) {
+  root.querySelectorAll("[data-flag]").forEach(b => b.addEventListener("click", async () => {
+    b.disabled = true; const { error } = await sb.rpc("flag_fault", { p_fault: b.dataset.flag, p_priority: "high" });
+    if (error) { alert("Couldn't flag it: " + error.message); b.disabled = false; return; } lhTeleLoad();
+  }));
+  root.querySelectorAll("[data-dismiss]").forEach(b => b.addEventListener("click", async () => {
+    const why = prompt("Dismiss this code. Reason (optional):"); if (why === null) return;
+    const { error } = await sb.rpc("dismiss_fault", { p_fault: b.dataset.dismiss, p_reason: why || null });
+    if (error) { alert("Couldn't dismiss it: " + error.message); return; } lhTeleLoad();
+  }));
+}
+function lhIsaacBlock(unit, gps) {
+  const t = TELE.trucks[String(unit)]; const v = t && t.extra && t.extra.isaac || null;
+  if (!t) return '<div class="small muted">Not reporting to ISAAC. Check the unit number matches ISAAC\'s vehicle number.</div>';
+  const faults = TELE.faults.filter(f => f.unit === String(unit));
+  const cell = (l, v) => '<div><div class="lbl">' + l + '</div><div>' + (v == null || v === "" ? '<span class="muted">-</span>' : v) + '</div></div>';
+  const maps = t.last_lat != null ? '<a target="_blank" rel="noopener" href="https://www.google.com/maps?q=' + t.last_lat + ',' + t.last_lng + '">' + lhEsc(t.last_address || (t.last_lat.toFixed(3) + ", " + t.last_lng.toFixed(3))) + '</a>' : null;
+  return '<div class="lbl">Live from ISAAC</div><div class="row4" style="gap:10px">' +
+    cell("Last position", maps ? maps + ' <span class="muted small">' + lhAgo(t.last_position_at) + '</span>' : null) +
+    cell("Speed", t.last_speed != null ? Math.round(t.last_speed) + " mph" : null) +
+    cell("Odometer", t.odometer != null ? Math.round(t.odometer).toLocaleString() + " mi" : null) +
+    cell("Engine hours", t.engine_hours != null ? Math.round(t.engine_hours).toLocaleString() : null) +
+    cell("Driver on truck", gps && gps.driver ? lhEsc(gps.driver) : null) +
+    cell("ISAAC vehicle", v ? lhEsc([v.description, v.modelYear].filter(Boolean).join(" ")) : null) +
+    cell("Serial / VIN (ISAAC)", v && v.serialNo ? lhEsc(v.serialNo) : null) +
+    cell("Plate (ISAAC)", v && v.licensePlate ? lhEsc(v.licensePlate + (v.jurisdictionCode ? " " + v.jurisdictionCode : "")) : null) +
+    cell("ELD", v ? (v.eldCompliant ? '<span class="pill on">ELD compliant</span>' : '<span class="pill warn">Not ELD compliant</span>') + (v.isOutOfService ? ' <span class="pill bad">OOS in ISAAC</span>' : '') : null) +
+    '</div><div class="lbl" style="margin-top:8px">Fault codes ' + (faults.length ? '<span class="pill ' + (faults.some(f => f.status === "new") ? 'bad' : 'info') + '">' + faults.length + '</span>' : '') + '</div>' +
+    (faults.length ? '<div class="tablewrap" style="max-height:none"><table><thead><tr><th>Unit</th><th>Code</th><th>What</th><th>Lamp</th><th>Seen</th><th>Status</th><th></th></tr></thead><tbody>' + lhFaultRows(faults, lhCanAct()) + '</tbody></table></div>' : '<div class="small muted">No open fault codes.</div>');
+}
 /* --- the shim the app calls --- */
 const claude = {
   use: async name => {
@@ -2458,18 +2484,21 @@ function renderTrips(){
 function renderEquipDb(){
   const tb=$("#trkTable"),rb=$("#trlTable");if(!tb)return;const q=EQF.q.toLowerCase();
   const fxT=t=>FX.t[t.id]||{},fxR=r=>FX.r[r.id]||{};
-  const trks=S.trucks.filter(t=>(EQF.st==="all"||(t.status||"Active")===EQF.st)&&(!q||[t.unit,t.vin,t.plate,t.make,fxT(t).lessor,fxT(t).device].join(" ").toLowerCase().includes(q)));
+  const live=t=>(typeof TELE!=="undefined"&&TELE.trucks[String(t.unit)])||null;const pingAt=t=>{const l=live(t);return l&&l.last_position_at?new Date(l.last_position_at).getTime():0};const openF=t=>typeof TELE==="undefined"?0:TELE.faults.filter(f=>f.unit===String(t.unit)&&(f.status==="new"||f.status==="flagged")).length;
+  const stOk=t=>EQF.st==="all"?true:EQF.st==="live"?pingAt(t)>0:EQF.st==="nolive"?!pingAt(t):EQF.st==="faults"?openF(t)>0:(t.status||"Active")===EQF.st;
+  const trks=S.trucks.filter(t=>stOk(t)&&(!q||[t.unit,t.vin,t.plate,t.make,fxT(t).lessor,fxT(t).device].join(" ").toLowerCase().includes(q)))
+    .sort((a,b)=>{const k=EQF.sort;const byUnit=String(a.unit).localeCompare(String(b.unit),undefined,{numeric:true});if(k==="ping")return pingAt(b)-pingAt(a)||byUnit;if(k==="odo")return numOr(live(b)&&live(b).odometer)-numOr(live(a)&&live(a).odometer)||byUnit;if(k==="year")return numOr(b.year)-numOr(a.year)||byUnit;if(k==="status")return TRK_STATUS.indexOf(a.status||"Active")-TRK_STATUS.indexOf(b.status||"Active")||byUnit;return byUnit});
   const act=S.trucks.filter(t=>(t.status||"Active")==="Active").length;$("#trkCnt").textContent=S.trucks.length+" total, "+act+" active";$("#trlCnt").textContent=(S.trailers||[]).length+" total";
   tb.innerHTML=trks.length?trks.map(t=>{const ci=(k,w,ph)=>'<input data-tk="'+t.id+'" data-k="'+k+'" value="'+esc(t[k]||"")+'"'+(w?' style="width:'+w+'px"':"")+(ph?' placeholder="'+ph+'"':"")+'>';const x=fxT(t);
-    return'<tr class="'+(FXOPEN==="t:"+t.id?"used":"")+'"><td class="num"><b>'+esc(t.unit)+'</b></td><td><select data-tk="'+t.id+'" data-k="status" style="min-width:140px">'+TRK_STATUS.map(s=>'<option'+(s===(t.status||"Active")?" selected":"")+'>'+s+'</option>').join("")+'</select></td><td>'+ci("year",60)+'</td><td>'+ci("make",150,"Freightliner Cascadia")+'</td><td>'+ci("vin",170)+'</td><td>'+ci("plate",80)+'</td><td class="small">'+(x.lessor?'<span class="pill info">'+esc(x.lessor)+'</span>':"Company")+'</td><td class="small">'+esc(x.device||"")+'</td><td>'+esc(t.equip)+'</td><td><select data-tk="'+t.id+'" data-k="trailerId">'+trlOptions(t)+'</select></td><td>'+esc(crewName(t)||"-")+'</td><td class="small">'+lhLiveCell(t.unit)+'</td><td>'+ci("notes",140)+'</td><td><button class="sm" data-fxo="t:'+t.id+'">Details</button></td></tr>'}).join(""):'<tr><td colspan="14" class="muted">No trucks match.</td></tr>';
+    return'<tr class="'+(FXOPEN==="t:"+t.id?"used":"")+'"><td class="num"><b>'+esc(t.unit)+'</b></td><td><select data-tk="'+t.id+'" data-k="status" style="min-width:140px">'+TRK_STATUS.map(s=>'<option'+(s===(t.status||"Active")?" selected":"")+'>'+s+'</option>').join("")+'</select></td><td>'+ci("year",60)+'</td><td>'+ci("make",150,"Freightliner Cascadia")+'</td><td>'+ci("vin",170)+'</td><td>'+ci("plate",80)+'</td><td class="small">'+(x.lessor?'<span class="pill info">'+esc(x.lessor)+'</span>':"Company")+'</td><td class="small">'+esc(x.device||"")+'</td><td>'+esc(t.equip)+'</td><td><select data-tk="'+t.id+'" data-k="trailerId">'+trlOptions(t)+'</select></td><td>'+esc(crewName(t)||"-")+'</td><td class="small">'+lhLiveCell(t.unit)+'</td><td>'+ci("notes",140)+'</td><td><button class="sm" data-fxo="t:'+t.id+'">'+(FXOPEN==="t:"+t.id?"Close":"Details")+'</button></td></tr>'+(FXOPEN==="t:"+t.id?'<tr><td colspan="14" style="padding:0">'+fxDetailHtml()+'</td></tr>':"")}).join(""):'<tr><td colspan="14" class="muted">No trucks match.</td></tr>';
   tb.querySelectorAll("[data-tk]").forEach(x=>x.addEventListener("change",()=>{const t=S.trucks.find(y=>y.id===x.dataset.tk);if(!t)return;t[x.dataset.k]=x.value.trim();save();renderEquipDb();renderTrucks();if(x.dataset.k==="status")buildPlan(true)}));
   const trls=(S.trailers||[]).filter(r=>!q||[r.no,r.reefer,r.location,fxR(r).vin,fxR(r).plate,fxR(r).reeferSerial,fxR(r).rfid].join(" ").toLowerCase().includes(q));
   rb.innerHTML=trls.length?trls.map(r=>{const on=S.trucks.find(t=>t.trailerId===r.id);const ci=(k,w,ph)=>'<input data-rl="'+r.id+'" data-k="'+k+'" value="'+esc(r[k]||"")+'"'+(w?' style="width:'+w+'px"':"")+(ph?' placeholder="'+ph+'"':"")+'>';
     return'<tr class="'+(FXOPEN==="r:"+r.id?"used":"")+'"><td>'+ci("no",80)+'</td><td><select data-rl="'+r.id+'" data-k="type">'+EQUIP.map(e=>'<option'+(e===r.type?" selected":"")+'>'+e+'</option>').join("")+'</select></td><td>'+ci("year",60)+'</td><td>'+ci("reefer",140,"Thermo King S-600")+'</td><td class="small num">'+esc(fxR(r).reeferSerial||"")+'</td><td>'+ci("orbcomm",120)+'</td><td><select data-rl="'+r.id+'" data-k="status">'+TRL_STATUS.map(s=>'<option'+(s===r.status?" selected":"")+'>'+s+'</option>').join("")+'</select></td><td>'+ci("location",130,"Springfield yard")+'</td><td>'+(on?"Unit "+esc(on.unit):'<span class="muted">-</span>')+'</td><td>'+ci("notes",140)+'</td><td><span class="actions" style="flex-wrap:nowrap"><button class="sm" data-fxo="r:'+r.id+'">Details</button><button class="sm" data-rdel="'+r.id+'">Remove</button></span></td></tr>'}).join(""):'<tr><td colspan="11" class="muted">'+((S.trailers||[]).length?"No trailers match.":"No trailers yet.")+'</td></tr>';
   rb.querySelectorAll("[data-rl]").forEach(x=>x.addEventListener("change",()=>{const r=trlById(x.dataset.rl);if(!r)return;r[x.dataset.k]=x.value.trim();save();renderTrucks()}));
   rb.querySelectorAll("[data-rdel]").forEach(x=>x.addEventListener("click",()=>{S.trailers=S.trailers.filter(r=>r.id!==x.dataset.rdel);delete FX.r[x.dataset.rdel];S.trucks.forEach(t=>{if(t.trailerId===x.dataset.rdel)t.trailerId=""});save();saveFx();renderEquipDb();renderTrucks()}));
-  document.querySelectorAll("[data-fxo]").forEach(b=>b.addEventListener("click",()=>{FXOPEN=FXOPEN===b.dataset.fxo?"":b.dataset.fxo;renderEquipDb();const d=$("#fxDetail");if(FXOPEN&&d.scrollIntoView)d.scrollIntoView({block:"start"})}));
-  $("#fxDetail").innerHTML=fxDetailHtml();wireFxDetail();
+  document.querySelectorAll("[data-fxo]").forEach(b=>b.addEventListener("click",()=>{FXOPEN=FXOPEN===b.dataset.fxo?"":b.dataset.fxo;renderEquipDb();const d=$("#fxDetail");if(FXOPEN&&FXOPEN.startsWith("r:")&&d.scrollIntoView)d.scrollIntoView({block:"start"})}));
+  $("#fxDetail").innerHTML=FXOPEN.startsWith("r:")?fxDetailHtml():"";wireFxDetail();
 }
 function wireFleetDb(){
   $("#coverBtn").addEventListener("click",coverOpen);
@@ -3160,7 +3189,7 @@ $("#clearLoads").addEventListener("click",()=>{S.loads=[];PLAN=null;CHECKED=new 
 function statusPills(){$("#statusPills").innerHTML='<span class="pill '+(PULLED.length?"on":"warn")+'">'+(PULLED.length?Object.keys(BOARDS).length+" board"+(Object.keys(BOARDS).length>1?"s":"")+" pulled":"No pull yet")+'</span><span class="pill '+(sample?"on":"warn")+'">Claude '+(sample?"ready":"off")+'</span>'}
 /* ---------- Ditat import: fleet detail, driver roster, component PMs ---------- */
 let FX={t:{},r:{},savedAt:0},fxSavedAt=0,ROSTER=[],rosterSavedAt=0,rosterMetaN=0,rosterQ=Promise.resolve(),rosterT=null;
-let RFILT={v:"active",q:""},ROPEN="",FXOPEN="",EQF={q:"",st:"all"};
+let RFILT={v:"active",q:""},ROPEN="",FXOPEN="",EQF={q:"",st:"all",sort:"unit"};
 try{const v=JSON.parse(localStorage.getItem("loadhunter.fleetx")||"null");if(v&&v.t){FX=v;fxSavedAt=v.savedAt||0}}catch(e){}
 try{const v=JSON.parse(localStorage.getItem("loadhunter.roster")||"null");if(v&&Array.isArray(v.items)){ROSTER=v.items;rosterSavedAt=v.savedAt||0}}catch(e){}
 const DITAT_DATE=s=>{s=String(s==null?"":s).trim();const m=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);return m?m[3]+"-"+m[1].padStart(2,"0")+"-"+m[2].padStart(2,"0"):s};
@@ -3239,9 +3268,9 @@ function wireImport(){document.querySelectorAll("[data-imp]").forEach(i=>i.addEv
 /* detail editors */
 function fxDetailHtml(){if(!FXOPEN)return"";const isT=FXOPEN.startsWith("t:");const id=FXOPEN.slice(2);const eq=isT?S.trucks.find(t=>t.id===id):(S.trailers||[]).find(r=>r.id===id);if(!eq)return"";
   const bag=isT?(FX.t[id]||(FX.t[id]={})):(FX.r[id]||(FX.r[id]={}));const defs=isT?TFX:RFX;
-  return'<section class="panel" id="fxPanel"><div class="hd"><h2>'+(isT?"Unit "+esc(eq.unit):"Trailer "+esc(eq.no))+' details</h2><button class="sm" data-fxclose>Close</button></div><div class="row4">'+
+  return'<section class="panel" id="fxPanel"><div class="hd"><h2>'+(isT?"Unit "+esc(eq.unit):"Trailer "+esc(eq.no))+' details</h2><button class="sm" data-fxclose>Close</button></div>'+(isT&&typeof lhIsaacBlock==="function"?lhIsaacBlock(eq.unit,feedOf(eq).gps):"")+'<div class="lbl" style="margin-top:8px">From Ditat</div><div class="row4">'+
     defs.map(([k,lb])=>'<label>'+esc(lb)+'<input data-fx="'+k+'"'+(FX_DATES.has(k)?' type="date"':"")+' value="'+esc(bag[k]||"")+'"></label>').join("")+'</div></section>'}
-function wireFxDetail(){const p=$("#fxPanel");if(!p)return;const isT=FXOPEN.startsWith("t:");const id=FXOPEN.slice(2);
+function wireFxDetail(){const p=$("#fxPanel");if(!p)return;const isT=FXOPEN.startsWith("t:");const id=FXOPEN.slice(2);if(typeof lhWireFaultButtons==="function")lhWireFaultButtons(p);
   p.querySelector("[data-fxclose]").addEventListener("click",()=>{FXOPEN="";renderEquipDb()});
   p.querySelectorAll("[data-fx]").forEach(x=>x.addEventListener("change",()=>{const bag=isT?(FX.t[id]||(FX.t[id]={})):(FX.r[id]||(FX.r[id]={}));const v=x.value.trim();if(v)bag[x.dataset.fx]=v;else delete bag[x.dataset.fx];saveFx();renderEquipDb()}))}
 const expPill=(d,lb)=>{if(!d)return"";const t=new Date(d+"T12:00").getTime();if(isNaN(t))return esc(d);const days=(t-Date.now())/DAY;return'<span class="'+(days<0?"pill bad":days<30?"pill warn":"")+'">'+esc(fmtDay(d))+(days<0?" expired":"")+'</span>'};
@@ -3274,7 +3303,7 @@ function renderRosterDetail(){const box=$("#rosterDetail");if(!box)return;const 
   box.querySelectorAll("[data-rf]").forEach(x=>x.addEventListener("change",()=>{const k=x.dataset.rf;const v=x.value.trim();if(v)r[k]=v;else delete r[k];
     if(k==="first"||k==="last"||k==="phone"){const dd=S.drivers.find(y=>y.ditatId===r.id);if(dd){if(k==="phone")dd.phone=fmtPhone(r.phone);else dd.name=fullName(r);S.trucks.forEach(t=>{if(t.driverId===dd.id||t.driver2Id===dd.id)t.driver=crewName(t)})}}
     if(k==="status")after();else{saveRoster();save()}}))}
-function wireEqFilter(){$("#eqQ").addEventListener("input",e=>{EQF.q=e.target.value.trim();renderEquipDb()});$("#eqSt").addEventListener("change",e=>{EQF.st=e.target.value;renderEquipDb()})}
+function wireEqFilter(){$("#eqQ").addEventListener("input",e=>{EQF.q=e.target.value.trim();renderEquipDb()});$("#eqSt").addEventListener("change",e=>{EQF.st=e.target.value;renderEquipDb()});$("#eqSort").addEventListener("change",e=>{EQF.sort=e.target.value;renderEquipDb()})}
 function wireRoster(){wireEqFilter();$("#rosterView").addEventListener("change",e=>{RFILT.v=e.target.value;renderRoster()});$("#rosterQ").addEventListener("input",e=>{RFILT.q=e.target.value.trim();renderRoster()})}
 /* component services (Ditat service types) */
 const DITAT_COMP=[["Engine oil and filter",180,7,25000,20000,"Replace engine oil and filter (synthetic)"],["Fuel filters",365,30,50000,30000,"Replace fuel filters"],["Air filter",500,365,75000,50000,"Replace air filter"],["DPF cleaning",1000,700,300000,200000,"Remove and clean DPF"],["Differential fluid",1500,1200,500000,300000,"Replace rear axle lubricant"],["Transmission fluid and filter",1500,1200,500000,300000,"Replace transmission oil and filter"]];
@@ -3493,7 +3522,16 @@ $("#y_add").addEventListener("click",yardAddFromForm);try{$("#y_ready").value=to
 claude.use("sample").then(s=>{sample=s;statusPills()});
 claude.use("assets").then(a=>{assets=a;if(PAGE==="maint")renderMaintDetail();if(PAGE==="claims")renderClaimDetail()});
 claude.use("mcp").then(m=>{mcp=m;if(m)setTimeout(pullReeferSheet,1500);if(!m){setSheet("off",sheetErr({code:"no_mcp"}));return}setSheet("ready","");if(DIRTY.size)syncSoon(500);else if(PAGE!=="plan")pullSheet(false)});
-})();
-</script>
+
+/* ---------- ISAAC: refresh pages when live data lands, auto-activate pinging trucks, fill blanks ---------- */
+const LH_AUTO_ACTIVE_DAYS=7;
+function lhApplyTele(){if(typeof TELE==="undefined")return 0;let ch=0;
+  S.trucks.forEach(t=>{const l=TELE.trucks[String(t.unit)];if(!l)return;const v=l.extra&&l.extra.isaac||{};
+    if(!t.vin&&v.serialNo){t.vin=v.serialNo;ch++}if(!t.plate&&v.licensePlate){t.plate=v.licensePlate;ch++}if(!t.year&&v.modelYear){t.year=String(v.modelYear);ch++}
+    const fresh=l.last_position_at&&(Date.now()-new Date(l.last_position_at).getTime())<LH_AUTO_ACTIVE_DAYS*DAY;
+    if(fresh&&(t.status||"Active")==="Out of service"){t.status="Active";t.autoActiveAt=new Date().toISOString();ch++}});
+  if(ch){save();renderTrucks();try{buildPlan(true)}catch(e){}}return ch}
+window.lhRefresh=function(){try{lhApplyTele()}catch(e){console.error(e)}if(PAGE==="equip")renderEquipDb();if(PAGE==="maint")renderFaults()};
+})();</script>
 
 </body></html>
