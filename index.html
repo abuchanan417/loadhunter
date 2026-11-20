@@ -13,7 +13,7 @@
 
 <title>Load Hunter</title>
 <meta name="claude:viewport-fit-sides" content="cover">
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.1/dist/umd/supabase.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.119.2/dist/umd/supabase.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
 <style>
@@ -649,8 +649,9 @@ const lhReady = new Promise(resolve => {
   sb.auth.onAuthStateChange((ev, s) => { if (s && !lhSession) go(s); if (ev === "SIGNED_OUT") { lhSession = null; location.reload(); } });
 });
 async function loadProfile() {
-  try { const { data } = await sb.from("profiles").select("id,full_name,email,roles,is_admin").eq("id", lhSession.user.id).maybeSingle(); lhProfile = data; } catch (e) { lhProfile = null; }
-  if (!lhProfile) { lhProfile = { id: lhSession.user.id, full_name: lhSession.user.email, roles: [], is_admin: false }; }
+  let perr = null;
+  try { const { data, error } = await sb.from("profiles").select("id,full_name,email,roles,is_admin").eq("id", lhSession.user.id).maybeSingle(); lhProfile = data; perr = error; } catch (e) { lhProfile = null; perr = e; }
+  if (!lhProfile) { lhProfile = { id: lhSession.user.id, full_name: lhSession.user.email, roles: [], is_admin: false }; console.error("profile load failed", perr); if (perr) { const n0 = document.getElementById("lhWho"); if (n0) { n0.textContent = "Profile error: " + (perr.message || perr.code || "unknown"); n0.style.color = "var(--bad)"; } return; } }
   const n = document.getElementById("lhWho"); if (n) n.textContent = lhProfile.full_name || lhSession.user.email;
   const nu = document.getElementById("navUsers"); if (nu) nu.hidden = !lhProfile.is_admin;
 }
